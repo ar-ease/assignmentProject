@@ -1,5 +1,27 @@
 # Pickup Counter
 
+Pickup Counter is a snack-ordering demo with a Next.js customer screen, an Express API and PostgreSQL. Orders reserve stock for a timed hold; signed payment captures either confirm the order or flag it for review. Real-database tests exercise competing customers, payment retries and expiry races. This checkout has no pickup claim endpoint, so pickup proof remains open.
+
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+
+Replace `OWNER/REPO` in both badge URLs with your repository path.
+
+## Guarantees
+
+Test names below are literal names from the files, including parameter placeholders.
+
+| Guarantee | How it's enforced | Test that proves it |
+| --- | --- | --- |
+| Stock never oversold | Product row locks in ID order, followed by a fresh reservation query inside the transaction | `backend/tests/orders.test.ts`: `ten concurrent requests reserve exactly two Veg Puffs without overselling` |
+| Holds expire and release units | Database deadlines; availability ignores overdue holds before lazy expiry or sweeping | `backend/tests/orders.test.ts`: `expired holds release stock before lazy expiry or the sweeper runs` |
+| Webhooks are safe to repeat, sequentially and concurrently | Unique event ID insert and order update commit together | `backend/tests/payments.test.ts`: `sequential retries record one event and preserve paid_at`; `five simultaneous retries pay once and record one event` |
+| Forged or tampered webhooks are rejected | HMAC-SHA256 over raw bytes; constant-time signature comparison before JSON parsing | `backend/tests/payments.test.ts`: `rejects %s signatures without recording events or changing orders`; `accepts signatures over exact bytes including whitespace and Unicode` |
+| Wrong amounts are never marked paid | Capture amount must match the snapshotted total; mismatches enter review | `backend/tests/payments.test.ts`: `wrong amount flags review and exposes the reason on GET /orders/:id` |
+| Late payments never oversell | Lock and recheck every product, excluding the paying order's own hold | `backend/tests/payments.test.ts`: `two late captures competing for the last stock cannot both pay`; `a capture delayed across expiry cannot take stock already reallocated to a new order` |
+| Only one pickup succeeds | Unverified: this checkout has no claim endpoint or conditional pickup UPDATE | No existing test. `backend/tests/invariants.test.ts` contains an explicit pickup TODO, not passing proof |
+| Stock never negative, CHECK constraint backstop | PostgreSQL `products_stock_check`, including raw SQL writes | `backend/tests/products.test.ts`: `database CHECK rejects negative stock even through raw SQL` |
+| Countdown correct under clock skew | Server duration resynced against monotonic `performance.now()` | `frontend/lib/countdown.test.ts`: `ignores a wall clock skew of %i minutes`, exercised at +10 and -10 minutes |
+
 The backend supports products, orders with stock holds and expiry, and signed payment webhooks.
 Step 5 adds the customer menu, cart and payment status screens in `frontend/`.
 
@@ -126,3 +148,117 @@ or `--status failed` on a fresh order to demonstrate an ignored event.
 ## Next steps
 
 - Add a refund flow for amount mismatches, unavailable late-payment stock, and potential double charges from distinct captures of an already-paid order. Step 3 records/warns but does not issue refunds.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    customer["Customer screen (Next.js)"] --> api["Express API"]
+    provider["Payment provider (send-webhook)"] --> api
+    locker["Locker"] -.->|"pickup endpoint missing in this checkout"| api
+    api --> db[(PostgreSQL)]
+```
+
+The locker connection and `paid` to `picked_up` transition describe the intended pickup
+flow. They are not implemented or verified in this checkout.
+
+```mermaid
+stateDiagram-v2
+    pending --> paid: valid capture
+    pending --> expired: hold elapsed
+    pending --> needs_review: amount mismatch
+    expired --> paid: late payment, stock still free
+    expired --> needs_review: late payment, sold out
+    paid --> picked_up: one claim wins
+    note right of picked_up
+        Claim endpoint missing at HEAD
+    end note
+```
+
+An overdue pending order can also take the late-payment path before a read or sweep stores
+`expired`. The handler checks the database deadline as well as the stored status.
+
+## How I verified this
+
+Mutation checks ran against real PostgreSQL 16 in Docker with Node 20 on 2026-10-24.
+Each available mutation ran alone. Only the tests named below ran, three times per
+mutation. Source and test directories were mounted read-only into each test container
+so it tested the working files rather than an older image. All runs used `pickup_test`.
+
+| Mutation | Test | Result |
+| --- | --- | --- |
+| Remove `FOR UPDATE` from order creation's product query | `backend/tests/orders.test.ts`: `ten concurrent requests reserve exactly two Veg Puffs without overselling` | Failed 3/3 runs: **6, 9, then 3** of 10 orders succeeded for 2 units, instead of exactly 2. The race reproduced in these runs; scheduling is not deterministic. |
+| Remove `AND status = 'paid'` from pickup UPDATE, keeping a JS status check | Simultaneous-claims tests | Not run. Neither the pickup UPDATE nor claim tests exist at HEAD `fe7940e`. This is a gap, not a surviving mutation or proof of safety. |
+| Skip the event insert and duplicate early return, processing every event | `backend/tests/payments.test.ts`: `sequential retries record one event and preserve paid_at`; `five simultaneous retries pay once and record one event` | Both failed in all 3 isolated runs. Sequential retry returned `ignored/already_final`, not `duplicate`; simultaneous retries returned 1 `paid` and 4 `ignored`, not 4 `duplicate`. The remaining final-status guard still prevented a second payment transition. |
+| HMAC `JSON.stringify(JSON.parse(body))` instead of the raw bytes | `backend/tests/payments.test.ts`: `accepts signatures over exact bytes including whitespace and Unicode`; `rejects %s signatures without recording events or changing orders`; `checks signatures before attempting JSON parsing` | Each run had 3 failures and 5 passes: correctly signed whitespace JSON returned 401 instead of 200; the tampered-whitespace case returned 200 instead of 401; malformed JSON with an invalid signature returned 500 instead of 401. Same results on all 3 runs. The whitespace test already existed and was retained. |
+
+After each mutation, `git checkout -- <file>` restored the source and
+`git diff --exit-code HEAD -- <file>` confirmed no difference. The final source diff
+must remain empty. No mutation is part of the finished change.
+
+To repeat a selected check from the repository root, temporarily make only its mutation,
+then run this command three times with the file and `-t` filter from the table:
+
+```sh
+docker compose run --rm \
+  -v "$PWD/backend/src:/app/src:ro" \
+  -v "$PWD/backend/tests:/app/tests:ro" \
+  backend npm test -- tests/orders.test.ts -t 'ten concurrent requests'
+# Restore after the experiment, even if the test fails:
+git checkout -- backend/src/orders.ts
+git diff --exit-code HEAD -- backend/src/orders.ts
+```
+
+The duplicate-webhook filter is `sequential retries|five simultaneous retries`; the
+signature filter is `signatures|signature`. Both use `tests/payments.test.ts`.
+
+`backend/tests/invariants.test.ts` runs `inventory and webhook invariants across 60
+operations in three waves, seed 20261024`. A seeded generator chooses products,
+quantities, existing orders and operation order before each `Promise.all`. About 65%
+of product choices target the two-unit Veg Puff. Later waves mix orders, valid captures,
+wrong amounts, copies of events already sent in an earlier wave, and conditional SQL
+updates that force pending deadlines into the past. The seed reproduces random choices;
+database scheduling and which competing requests win can still vary.
+
+After every wave, independent database queries check nonnegative stock and availability,
+stock plus collected quantities against initial stock, exact distinct webhook event IDs,
+and timestamps on any collected orders. The test also requires actual paid and review
+outcomes, at least one forced expiry and four acknowledged duplicates. Pickup requests
+and the successful-claim count invariant remain an explicit TODO. No picked-up orders
+are produced, so conservation and pickup timestamp checks do not prove collection safety.
+
+| Consecutive stress run | Result | Vitest duration |
+| --- | --- | --- |
+| 1 | 1 passed, 1 pickup TODO | 1.60s |
+| 2 | 1 passed, 1 pickup TODO | 1.31s |
+| 3 | 1 passed, 1 pickup TODO | 1.21s |
+| 4 | 1 passed, 1 pickup TODO | 1.06s |
+| 5 | 1 passed, 1 pickup TODO | 1.11s |
+
+Final verification on the restored source: backend **80 passed, 1 pickup TODO** across
+6 files; frontend **8 passed** across 2 files; the Node 20 production build passed,
+including TypeScript checking. The two changed backend test files also passed a
+separate strict TypeScript check. Application source has no diff against HEAD.
+
+## CI first run
+
+`.github/workflows/ci.yml` runs on every push and pull request. Separate `backend` and
+`frontend` jobs use Node 20, `npm ci` and npm caches keyed by each package's lockfile.
+The backend gets a PostgreSQL 16 service with matching `pickup` credentials and a
+`pickup_test` database; the existing database-name guard is unchanged. Vitest's global
+setup deploys migrations before the tests. The frontend runs its tests and production build.
+Service networking and cache configuration follow the
+[GitHub PostgreSQL example](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-postgresql-service-containers)
+and [setup-node documentation](https://github.com/actions/setup-node/tree/v6#caching-global-packages-data).
+
+The workflow has not run on GitHub yet. On its first run, check:
+
+1. Both jobs appear under **Actions → CI** for the pushed commit or PR.
+2. Setup Node reports v20 and looks for the correct package lockfile. A first-run cache
+   miss is expected; later runs can restore it.
+3. The backend Postgres service becomes healthy. Prisma generation succeeds and test
+   migration output names `pickup_test` at `localhost:5432`, then applies two migrations.
+4. Backend tests finish without failures; the pickup TODO must remain visible until the
+   missing implementation and proof are supplied. Green CI alone does not close that gap.
+5. Frontend tests pass, and `next build` completes TypeScript checking and lists `/` and
+   `/orders/[id]`. Neither job needs a separately running API or a repository secret.

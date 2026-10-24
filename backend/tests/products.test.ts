@@ -47,3 +47,10 @@ test('seed is idempotent and preserves current stock', async () => {
   expect(await prisma.product.count()).toBe(5);
   expect(await prisma.product.findUnique({ where: { name: 'Samosa' } })).toMatchObject({ stock: 7 });
 });
+
+test('database CHECK rejects negative stock even through raw SQL', async () => {
+  const { prisma } = await import('../src/db.js');
+  await expect(prisma.$executeRaw`UPDATE products SET stock = -1 WHERE name = 'Veg Puff'`)
+    .rejects.toThrow('products_stock_check');
+  expect(await prisma.product.findUniqueOrThrow({ where: { name: 'Veg Puff' } })).toMatchObject({ stock: 2 });
+});

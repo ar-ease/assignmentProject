@@ -1,47 +1,93 @@
 # Pickup Counter handoff
 
-Updated 2026-10-24 after Step 3 payment handling.
+Updated 2026-10-24 during Step 6, proof and polish.
 
 ## Scope and current state
 
-Steps 1 and 2 are complete: products, transactional order creation with stock holds, GET /orders/:id, lazy expiry and the five-second expiry sweep.
-Step 3 is complete: signed payment webhook, idempotent processing, late-payment stock checks, review reasons, and the send-webhook script.
-Step 4, pickup claim, is next. No pickup endpoint or customer ordering/payment UI was implemented. Wait for the user's Step 4 instructions.
+Products, transactional orders and holds, expiry, signed payment webhooks and the
+customer ordering/payment screens are implemented. Step 6 adds evidence, tests, CI and
+documentation only. Application source, migrations, dependencies and runtime configuration
+must remain identical to HEAD `fe7940e` (`Customer screen`). No commits were made.
 
-The user requested no commits. This agent created no commits. HEAD during continuation was `846cfed` (`until payment webhook`); the final expiry-race fix, its test, README note, and this handoff remain uncommitted. Recheck `git status --short` before editing.
+Pickup is missing from this checkout. Despite commit `15dd5a6` being named `pickup claim`,
+it only changed payment handling/tests and documentation. `backend/src/routes/orders.ts`
+has POST /orders and GET /orders/:id, with no pickup route, conditional pickup UPDATE or
+simultaneous-claim tests. The user was informed and work continued on available proof.
+Do not describe Step 6 as fully complete or claim pickup safety is verified.
 
-The stack is running. The backend was rebuilt and restarted with the final implementation. Its startup deploys migrations, seeds missing products, then starts the compiled server. The new migration has been applied to both `pickup` and `pickup_test`.
+## What changed
 
-## Stack and invariants
+- `backend/tests/invariants.test.ts`: fixed seed 20261024, 60 concurrent operations in three
+  waves. Mixes orders, valid captures, wrong amounts, already-sent event duplicates and
+  forced pending expiry. Uses independent SQL after every wave to check stock,
+  reservations, conservation, exact event IDs and timestamps. Requires real paid/review
+  outcomes, forced expiry and acknowledged duplicates. Pickup integration and the
+  at-most-one successful claim assertion remain an explicit `test.todo`.
+- `backend/tests/products.test.ts`: raw SQL negative-stock write must fail with
+  `products_stock_check`, preserving the previous stock.
+- `.github/workflows/ci.yml`: push and PR triggers; separate backend/frontend jobs, Node 20,
+  per-package npm caches and `npm ci`. Backend generates Prisma and runs tests against a
+  healthy PostgreSQL 16 service named `pickup_test`. Frontend runs tests and production build.
+  Uses checkout/setup-node v6 and read-only repository permissions. No repository secrets
+  are required; credentials and webhook secret are disposable CI values.
+- README additions preserve existing sections: summary, badge placeholder, guarantees
+  mapped to real test names, architecture/state Mermaid diagrams, mutation results,
+  stress results and a first-CI-run checklist. Pickup is explicitly marked missing.
 
-- Independent `backend/` and `frontend/` npm packages, no workspaces. Express 5, strict TypeScript, Prisma 6.19.3, PostgreSQL 16, zod 4, tsx, Vitest and supertest. Node 20 in Docker; this host currently runs Node 24.
-- Express is the only API. Frontend Next.js calls it directly. No Next.js API routes.
-- All money uses integer paise; database tables/columns use snake_case with Prisma camelCase mappings.
-- Database `now()` determines holds and paid timestamps. Do not replace it with JavaScript time.
-- Inventory availability subtracts active pending holds plus paid orders. Expired, needs_review and picked_up orders do not reserve stock.
-- Lock an existing ORDER first, then its PRODUCT rows in ID order. Pickup must follow this order too. Order creation locks products in ID order before inserting a new order.
-- Under READ COMMITTED, read reservations in a separate statement after product locking so a previous lock holder's committed changes are visible.
-- Reuse `withTx` from `backend/src/db.ts` and `reservedUnitsSql` from `backend/src/reservations.ts`.
-- Tests use real Postgres, truncate only `pickup_test`, and must not run concurrently against that database. Vitest refuses other database names.
-- Existing Ponytail preference: smallest complete change, no extra dependencies or unsolicited features.
+## Verification and evidence
 
-## Step 3 implementation
+Mutation checks used real PostgreSQL 16 and Node 20 in Docker, with host source/tests
+mounted read-only so stale image code could not mask the mutation. Test database only.
 
-- `backend/src/app.ts` mounts POST `/payments/webhook` with `express.raw({ type: 'application/json', limit: '10kb', inflate: false })` before JSON routers. The comment explains that HMAC must cover exact received bytes. Compressed bodies return 415; oversized bodies return 413 through the central error handler.
-- `backend/src/config.ts` validates `WEBHOOK_SECRET` at startup, rejecting missing/blank values. It also retains Step 2 HOLD_SECONDS validation, default 120.
-- `backend/src/routes/payments.ts` checks for exactly 64 hex signature characters before constructing the comparison buffers, verifies HMAC-SHA256 using `timingSafeEqual`, and only then parses JSON and applies the zod schema. Rejected signatures return 401 INVALID_SIGNATURE; malformed JSON/schema return readable 400 VALIDATION_ERROR. Neither writes to the database.
-- `backend/src/payments.ts` performs all event insertion and order processing inside one `withTx` transaction. `INSERT ... ON CONFLICT DO NOTHING RETURNING event_id` serializes retries. A duplicate returns 200 duplicate without changing paid_at. If processing fails, the event rolls back so a retry can process it.
-- Malformed order UUIDs are recorded as null in webhook_events.order_id. Unknown orders are recorded and acknowledged with 200 ignored/unknown_order because retries cannot fix them.
-- Non-captured events are ignored. Captures of paid, picked_up or needs_review orders are ignored with a warning about a possible double charge.
-- Wrong amounts set needs_review/amount_mismatch. Correct captures pay with DB paid_at if stock is available. Late captures return late:true when paid, otherwise needs_review/late_payment_stock_unavailable.
-- Review found and a real-Postgres test reproduced an expiry race: a capture could start within its hold, wait on an order lock past expiry, and pay after another order reclaimed the last stock. The final code locks and rechecks products for EVERY correctly valued capture, explicitly excluding its own hold. It preserves order-before-product locking and the shared reservation helper. This prevents overselling across expiry.
-- `backend/prisma/migrations/20261024114000_order_review_reason/migration.sql` adds nullable orders.review_reason TEXT. Prisma maps it to reviewReason; GET /orders/:id includes that nullable field.
-- `backend/scripts/send-webhook.ts` runs via `npm run send-webhook -- <orderId> [--amount <paise>] [--event <id>] [--status <status>] [--bad-signature]`. It fetches the total unless --amount is supplied, generates/prints evt_<random> by default, signs the body, and prints HTTP status and response. Non-2xx and argument/network failures exit 1.
-- README includes the payment decisions, late-payment/refund rationale, edge-case table, and curl/CLI demo commands.
+| Mutation | Result over three isolated runs |
+| --- | --- |
+| Remove product `FOR UPDATE` in order creation | Failed 3/3: 6, 9, then 3 of 10 orders succeeded for 2 units. |
+| Remove pickup conditional status predicate | Not run: implementation and tests absent. |
+| Skip webhook event insert and duplicate early return | Both sequential and simultaneous tests failed 3/3. Retries returned ignored/already_final rather than duplicate. Final-status protection still prevented paying twice. |
+| HMAC normalized JSON instead of raw bytes | Each run: 3 failed, 5 passed. Whitespace-valid signature rejected, whitespace tampering accepted, invalid JSON/bad signature returned 500 instead of 401. Existing whitespace/Unicode test retained. |
+
+Each mutated source file was restored with `git checkout -- <file>` and checked with
+`git diff --exit-code HEAD -- <file>`. An initial restore needed sandbox approval; the
+idempotency experiment was repeated three times with only its own mutation afterward.
+All application source was restored before adding lasting tests/docs/CI.
+
+Five consecutive stress runs passed, each with 1 passing test and 1 pickup TODO.
+Vitest durations: 1.60s, 1.31s, 1.21s, 1.06s, 1.11s. The seed fixes random choices;
+concurrent scheduling and winners still vary. No collected orders are produced, so
+conservation/timestamp checks alone do not prove pickup correctness.
+
+Final full backend run: 6 files, 80 passing tests, 1 pickup TODO, zero failures, 7.58s.
+Frontend: 2 files, 8 passing tests; Node 20 production build passed, including TypeScript
+and routes `/`, `/_not-found`, `/orders/[id]`. A separate strict TypeScript check covers
+the two changed backend test files.
+
+Workflow YAML was parsed and checked for both triggers/jobs, Node versions, working
+folders, lockfile cache paths, command order, Postgres image/port/health check, matching
+credentials and the `/pickup_test` guard. Official GitHub action inputs/tags were checked.
+GitHub Actions itself has not run. README lists what to inspect on the first run.
+
+## Stack and invariants to preserve
+
+- Independent backend/frontend npm packages, no workspaces. Express is the only API;
+  Next.js calls it directly. No Next.js API routes.
+- Use Node 20. Host currently has Node 24; Docker verification uses Node 20.
+- Integer paise, snake_case database columns with Prisma mappings.
+- Database `now()` determines holds and paid timestamps. Availability subtracts active
+  pending holds and paid orders; expired/review/collected orders do not reserve stock.
+- Lock an existing ORDER first, then PRODUCT rows in ID order. Order creation locks
+  products in ID order before inserting a new order. Pickup must preserve this order.
+- Under READ COMMITTED, read reservations in a separate statement after product locking
+  to see the prior lock holder's commits. Reuse `withTx` and `reservedUnitsSql`.
+- Every correct capture rechecks stock, excluding its own hold, even if it began before
+  expiry. A lock wait may cross expiry while another order reclaims stock.
+- Webhook event insert and processing share one transaction. HMAC uses exact raw bytes
+  before parsing. Preserve validation, rollback/retry and final-order safeguards.
+- Tests truncate only `pickup_test`. Never run backend test processes concurrently
+  against the same database. Frontend checks can run alongside backend checks.
 
 ## Environment and commands
 
-Compose publishes frontend 3000, API 4000 and Postgres 5432. Working development defaults require no .env file:
+Compose publishes frontend 3000, API 4000 and PostgreSQL 5432. Default development values:
 
 ```dotenv
 DATABASE_URL=postgresql://pickup:pickup@db:5432/pickup?connection_limit=20
@@ -52,42 +98,35 @@ HOLD_SECONDS=120
 NEXT_PUBLIC_API_URL=http://localhost:4000
 ```
 
-The CLI uses API_URL, default http://localhost:4000, and the same default development secret as Compose. A custom Compose secret must also be exported for host CLI use. The CLI needs no database credentials.
-
 ```sh
 docker compose up --build -d
-# Run these test invocations sequentially:
-docker compose run --rm backend npm test
-# Host, after installing backend dependencies:
-(cd backend && npm run send-webhook -- <orderId>)
-# Inside the running backend container:
-docker compose exec backend npm run send-webhook -- <orderId>
+# Mount current source/tests when verifying changes without rebuilding the backend image:
+docker compose run --rm \
+  -v "$PWD/backend/src:/app/src:ro" \
+  -v "$PWD/backend/tests:/app/tests:ro" \
+  -v "$PWD/backend/vitest.config.ts:/app/vitest.config.ts:ro" \
+  backend npm test
+# Run from frontend/ with Node 20 installed:
+npm test
+npm run build
 ```
 
-Local server startup requires WEBHOOK_SECRET and DATABASE_URL. For local database commands, replace hostname db with an accessible host. A pre-existing host Postgres server has conflicted with Compose's localhost:5432 in this session; Docker tests avoid that issue. Do not stop unrelated databases or delete volumes.
+Host DB commands use localhost instead of db. A host PostgreSQL server previously
+conflicted with Compose on port 5432; Docker tests avoid that ambiguity. Do not stop
+unrelated databases or delete volumes. This step touched only test data.
 
-## Verification completed
+## Next
 
-Final backend image build passed Prisma generation and `npm run build`, including the script in TypeScript compilation.
-Three consecutive full runs of `docker compose run --rm backend npm test` passed on the final image:
+1. Resolve the missing Step 4 implementation before closing pickup proof. Then run its
+   conditional-update mutation three times and integrate simultaneous/duplicate pickup
+   operations plus successful-response counts into the seeded stress test. Re-run five times.
+2. Step 7: final README polish and AI_NOTES update, then the fresh-clone check.
+3. Replace OWNER/REPO in the badge and inspect the first GitHub Actions run using the
+   README checklist. Expected backend result currently includes one visible pickup TODO.
+4. User reviews and commits. Suggested message: `test: add mutation evidence, invariant stress test and CI`.
 
-| Run | Test files | Tests | Failures | Vitest duration |
-| --- | --- | --- | --- | --- |
-| 1 | 5 passed | 78 passed | 0 | 6.69s |
-| 2 | 5 passed | 78 passed | 0 | 7.12s |
-| 3 | 5 passed | 78 passed | 0 | 6.51s |
-
-The files contain 37 payment tests, 19 order tests, 8 CLI tests, 3 product tests and 11 config tests. Payment coverage includes all requested cases, exact whitespace/Unicode bytes, compressed/oversized bodies, concurrent late captures, every-item availability, transaction rollback/retry, and the reproduced expiry-boundary race. Expected warnings for captures of final orders appear in the test output.
-
-Manual host verification returned HTTP 200 paid/late:true. Reusing its event ID inside the container returned HTTP 200 duplicate. The container --bad-signature command printed HTTP 401 INVALID_SIGNATURE and exited 1 as expected. Both host and container then returned duplicate against the final rebuilt/restarted backend.
-Demo order `cf54386b-3790-4f11-ae7b-c49004391d7c` and event `evt_host_step3` remain in the development database; no cleanup deleted user data.
-One initial in-container CLI attempt reported fetch failed, but immediate API checks and subsequent CLI runs succeeded. Its transient cause was not established.
-The initial new tests failed as expected before implementation; the additional race test failed before the product-lock fix and passed afterward. No test failures remain.
-
-## Known limits and next step
-
-- PostgreSQL now() is transaction-stable. Long lock waits can conservatively count another hold that expired during the wait and send a payment to review. The late flag likewise reflects the transaction's DB time. Stock is still rechecked under locks to prevent overselling.
-- Refunds are not implemented. Amount mismatches, unavailable late captures and possible double charges need a refund flow. Never silently discard a customer's captured payment.
-- The Docker dependency install still reports three existing high-severity audit findings in Prisma tooling dependencies. No forced major upgrades or overrides were made.
-- Frontend/browser checks were not repeated for this backend-only step. No production deployment or production hardening was requested.
-- Next: Step 4 pickup claim. Follow the same order-before-products lock order and preserve payment/stock idempotency. Do not implement it without the user's next instructions.
+Refunds remain unimplemented. Review cases and distinct double captures need a refund
+flow. PostgreSQL transaction-time now() may conservatively send a delayed payment to
+review. Earlier installs reported existing Prisma-tooling audit findings; this step
+made no dependency changes or audit remediation. Browser checks, production deployment,
+and fresh-clone validation were not part of this step.
