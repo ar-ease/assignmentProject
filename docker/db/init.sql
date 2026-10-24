@@ -1,0 +1,2 @@
+CREATE DATABASE pickup;
+CREATE DATABASE pickup_test;

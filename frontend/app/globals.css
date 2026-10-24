@@ -1,0 +1,7 @@
+body { margin: 0; background: #faf9f6; color: #242424; font-family: Arial, sans-serif; }
+main { max-width: 640px; margin: 48px auto; padding: 0 24px; }
+h1 { margin-bottom: 8px; }
+ul { list-style: none; padding: 0; }
+li { padding: 16px 0; border-bottom: 1px solid #ddd; }
+h2 { font-size: 18px; margin: 0; }
+p { line-height: 1.5; }
