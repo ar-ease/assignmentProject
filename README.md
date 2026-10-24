@@ -1,7 +1,7 @@
 # Pickup Counter
 
-Step 3 supports products, orders with stock holds and expiry, and signed payment webhooks.
-Pickup is Step 4 and is not implemented yet.
+The backend supports products, orders with stock holds and expiry, and signed payment webhooks.
+Step 5 adds the customer menu, cart and payment status screens in `frontend/`.
 
 ```sh
 docker compose up --build
@@ -23,6 +23,38 @@ Tests truncate only the test database. Do not run tests concurrently against tha
 
 The seed inserts missing snacks and preserves existing stock on restart.
 The Docker backend startup runs migrations, seed, then the compiled server.
+
+## Customer screen
+
+At http://localhost:3000, add snacks to the cart and place an order. Quantities are capped
+at available stock and 20 per item. Stock refreshes every five seconds and after each
+order attempt; reduced stock adjusts the cart. All totals are calculated in integer paise.
+
+The payment page is `/orders/<id>`, so refreshing or reopening its URL loads the same order.
+It shows a demo UPI placeholder and a copyable command to simulate payment:
+
+```sh
+docker compose exec backend npm run send-webhook -- <id>
+```
+
+Order status polls every two seconds after the previous request completes, retries network
+errors, and stops on paid, expired, needs_review or picked_up. The countdown resyncs from
+the server's `expiresInSeconds` on every response and measures elapsed time with
+`performance.now()`. Device wall-clock skew cannot change it. At zero, the screen checks
+payment status and waits for the server to confirm expiry.
+
+To work on the frontend locally, use Node 20 and run these commands in `frontend/`:
+
+```sh
+npm ci
+npm run dev
+npm test
+npm run build
+```
+
+`npm test` runs small Vitest unit tests, including countdown advancement, resync, zero
+clamping, and wall clocks set ten minutes ahead and behind, plus cart stock limits and
+integer-paise calculations. `NEXT_PUBLIC_API_URL` defaults to `http://localhost:4000`.
 
 ## Decisions
 
@@ -93,5 +125,4 @@ or `--status failed` on a fresh order to demonstrate an ignored event.
 
 ## Next steps
 
-- Step 4: pickup claim, with order-before-products locking.
 - Add a refund flow for amount mismatches, unavailable late-payment stock, and potential double charges from distinct captures of an already-paid order. Step 3 records/warns but does not issue refunds.
