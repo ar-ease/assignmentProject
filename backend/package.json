@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node dist/src/server.js",
     "test": "vitest run",
+    "send-webhook": "tsx scripts/send-webhook.ts",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts"
   },

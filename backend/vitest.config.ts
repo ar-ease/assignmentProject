@@ -9,7 +9,7 @@ process.env.DATABASE_URL = testUrl;
 
 export default defineConfig({
   test: {
-    env: { DATABASE_URL: testUrl },
+    env: { DATABASE_URL: testUrl, WEBHOOK_SECRET: process.env.WEBHOOK_SECRET ?? 'local-development-webhook-secret' },
     globalSetup: ['./tests/global-setup.ts'],
     setupFiles: ['./tests/setup.ts'],
     fileParallelism: false,

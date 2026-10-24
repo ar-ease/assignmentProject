@@ -34,6 +34,7 @@ model Order {
   expiresAt   DateTime    @map("expires_at") @db.Timestamptz
   createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz
   paidAt      DateTime?   @map("paid_at") @db.Timestamptz
+  reviewReason String?    @map("review_reason") @db.Text
   pickedUpAt  DateTime?   @map("picked_up_at") @db.Timestamptz
   items       OrderItem[]
 
