@@ -21,6 +21,8 @@ test('inventory and webhook invariants across 60 operations in three waves, seed
   let expirations = 0;
   let duplicates = 0;
   let sequence = 0;
+  const successfulClaims = new Map<string, number>();
+  let pickupConflicts = 0;
 
   function place() {
     const product = random() < 0.65 ? puff : pick(initial);
@@ -37,9 +39,26 @@ test('inventory and webhook invariants across 60 operations in three waves, seed
   }
 
   for (let wave = 0; wave < 3; wave++) {
+    const [pickupOrder] = wave === 2
+      ? await prisma.order.findMany({ where: { status: 'paid' }, orderBy: { id: 'asc' }, take: 1 })
+      : [];
+    if (wave === 2) expect(pickupOrder).toBeDefined();
     // Choose all operations before starting requests so scheduling cannot change the PRNG sequence.
     const sent = [...events];
     const operations = Array.from({ length: 20 }, (_, index) => {
+      if (wave === 2 && index < 4) {
+        return async () => {
+          const response = await request(app).post(`/orders/${pickupOrder.id}/pickup-claim`);
+          expect([200, 409]).toContain(response.status);
+          if (response.status === 200) {
+            successfulClaims.set(pickupOrder.id, (successfulClaims.get(pickupOrder.id) ?? 0) + 1);
+          } else {
+            expect(response.body.error.code).toBe('ALREADY_CLAIMED');
+            pickupConflicts++;
+          }
+          return null;
+        };
+      }
       const kind = wave === 0 ? 0 : index % (wave === 1 ? 4 : 5);
       if (kind === 0) return place();
       if (kind === 4) {
@@ -101,12 +120,15 @@ test('inventory and webhook invariants across 60 operations in three waves, seed
     expect(await prisma.order.count({ where: {
       status: 'picked_up', OR: [{ paidAt: null }, { pickedUpAt: null }],
     } })).toBe(0);
+    for (const count of successfulClaims.values()) expect(count).toBeLessThanOrEqual(1);
+    for (const order of await prisma.order.findMany({ where: { status: 'picked_up' } })) {
+      expect(successfulClaims.get(order.id)).toBe(1);
+    }
   }
   expect(outcomes).toContain('paid');
   expect(outcomes).toContain('needs_review');
   expect(expirations).toBeGreaterThan(0);
   expect(duplicates).toBe(4);
+  expect(successfulClaims.size).toBe(1);
+  expect(pickupConflicts).toBe(3);
 });
-
-// Pickup is absent at HEAD; do not count zero claims as evidence of exactly-once collection.
-test.todo('mix simultaneous and duplicate pickup claims into the seeded stress test and assert at most one 200 per order');

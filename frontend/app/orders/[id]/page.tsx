@@ -37,7 +37,7 @@ function PaymentScreen({ id }: { id: string }) {
         resync(fresh.expiresInSeconds);
         setError('');
         setReconnecting(false);
-        if (fresh.status !== 'pending') return;
+        if (fresh.status !== 'pending' && fresh.status !== 'paid') return;
       } catch (cause: unknown) {
         if (controller.signal.aborted) return;
         setError(errorMessage(cause));
@@ -56,6 +56,7 @@ function PaymentScreen({ id }: { id: string }) {
   }, [id, resync]);
 
   const command = `docker compose exec backend npm run send-webhook -- ${order?.id ?? id}`;
+  const pickupCommand = `curl -i -X POST ${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000'}/orders/${id}/pickup-claim`;
 
   async function copyCommand() {
     try {
@@ -78,7 +79,7 @@ function PaymentScreen({ id }: { id: string }) {
     message = `Collect your order from the locker. Order ID: ${id}`;
     icon = '✓';
   } else if (status === 'picked_up') {
-    title = 'Order collected. Enjoy!';
+    title = 'Order collected';
     icon = '✓';
   } else if (status === 'expired') {
     title = 'Your hold expired';
@@ -143,6 +144,13 @@ function PaymentScreen({ id }: { id: string }) {
                 <button type="button" onClick={() => void copyCommand()}>Copy command</button>
                 <p className="small" role="status">{copyMessage}</p>
               </div>
+            </section>
+          )}
+          {status === 'paid' && (
+            <section className="panel developer-hint" aria-labelledby="pickup-heading">
+              <h2 id="pickup-heading">Developer: claim pickup</h2>
+              <code>{pickupCommand}</code>
+              <p className="muted small">Run from a terminal. This page updates after collection.</p>
             </section>
           )}
         </div>

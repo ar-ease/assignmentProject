@@ -94,6 +94,39 @@ export async function getOrder(id: string): Promise<OrderView> {
   });
 }
 
+export function claimPickup(id: string) {
+  return withTx(async (tx) => {
+    // A competing claim waits on this order row, then rechecks status and updates zero rows after the winner commits.
+    const [claimed] = await tx.$queryRaw<{ id: string; pickedUpAt: Date }[]>`
+      UPDATE orders SET status = 'picked_up', picked_up_at = now()
+      WHERE id = ${id}::uuid AND status = 'paid'
+      RETURNING id, picked_up_at AS "pickedUpAt"
+    `;
+    if (!claimed) {
+      const [order] = await tx.$queryRaw<{ status: OrderStatus; expired: boolean }[]>`
+        SELECT status, expires_at <= now() AS expired FROM orders WHERE id = ${id}::uuid
+      `;
+      if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'Order not found');
+      if (order.status === 'picked_up') throw new AppError(409, 'ALREADY_CLAIMED', 'Order already collected');
+      if (order.status === 'needs_review') throw new AppError(409, 'ORDER_NEEDS_REVIEW', 'Payment needs review');
+      if (order.status === 'expired' || (order.status === 'pending' && order.expired)) {
+        throw new AppError(409, 'ORDER_EXPIRED', 'Order hold expired');
+      }
+      throw new AppError(409, 'ORDER_NOT_PAID', 'Order is not paid');
+    }
+
+    const { items } = await readOrder(id, tx);
+    const ids = items.map((item) => item.productId);
+    await tx.$queryRaw`
+      SELECT id FROM products WHERE id = ANY(${ids}::int[]) ORDER BY id FOR UPDATE
+    `;
+    for (const item of items) {
+      await tx.$executeRaw`UPDATE products SET stock = stock - ${item.quantity} WHERE id = ${item.productId}`;
+    }
+    return { ...claimed, status: 'picked_up' as const, items };
+  });
+}
+
 // Availability already ignores overdue pending holds; sweeping only keeps the stored status accurate.
 export function expirePendingOrders(): Promise<number> {
   return prisma.$executeRaw`

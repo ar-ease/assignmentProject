@@ -1,6 +1,6 @@
 import { Router, json } from 'express';
 import { z } from 'zod';
-import { createOrder, getOrder } from '../orders.js';
+import { claimPickup, createOrder, getOrder } from '../orders.js';
 
 const itemSchema = z.object({
   productId: z.number().int().positive(),
@@ -23,4 +23,9 @@ ordersRouter.post('/', async (req, res) => {
 ordersRouter.get('/:id', async (req, res) => {
   const id = z.string().uuid().parse(req.params.id);
   res.json(await getOrder(id));
+});
+
+ordersRouter.post('/:id/pickup-claim', async (req, res) => {
+  const id = z.string().uuid().parse(req.params.id);
+  res.json(await claimPickup(id));
 });
