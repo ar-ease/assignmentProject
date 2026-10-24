@@ -40,18 +40,19 @@ export function processPayment(payload: z.infer<typeof webhookSchema>) {
     const late = order.status === 'expired' || !order.activeHold;
     if (payload.amountPaise !== order.totalPaise) {
       reviewReason = 'amount_mismatch';
-    } else if (late) {
+    } else {
       const items = await tx.orderItem.findMany({ where: { orderId: orderId! } });
       const ids = items.map((item) => item.productId);
       const products = await tx.$queryRaw<{ id: number; stock: number }[]>`
         SELECT id, stock FROM products WHERE id = ANY(${ids}::int[]) ORDER BY id FOR UPDATE
       `;
-      // Expired holds exclude this order's own items. A separate statement sees commits after the lock wait.
+      // Even active captures lock stock: a lock wait can cross expiry while another order reclaims it.
+      // Exclude our own hold and read separately after locking to see the previous lock holder's commits.
       const reservations = await tx.$queryRaw<{ id: number; reserved: number }[]>`
         SELECT p.id, ${reservedUnitsSql} AS reserved
         FROM products p
         LEFT JOIN order_items oi ON oi.product_id = p.id
-        LEFT JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN orders o ON o.id = oi.order_id AND o.id <> ${orderId}::uuid
         WHERE p.id = ANY(${ids}::int[])
         GROUP BY p.id
       `;

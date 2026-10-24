@@ -164,6 +164,38 @@ test('two late captures competing for the last stock cannot both pay', async () 
   expect(await availablePuffs()).toBe(0);
 });
 
+test('a capture delayed across expiry cannot take stock already reallocated to a new order', async () => {
+  const order = await place();
+  await prisma.$executeRaw`UPDATE orders SET expires_at = now() + interval '1500 milliseconds' WHERE id = ${order.id}::uuid`;
+  let payment: Promise<{ status: number; body: unknown }> | undefined;
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM orders WHERE id = ${order.id}::uuid FOR UPDATE`;
+      payment = sendWebhook(capture(order)).then((response) => response);
+      await expect.poll(async () => {
+        const [row] = await prisma.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query LIKE '%FROM orders WHERE id = $1%FOR UPDATE%') AS waiting
+        `;
+        return row.waiting;
+      }, { timeout: 1000, interval: 10 }).toBe(true);
+      // Wait on the actual DB deadline after confirming the capture is blocked, rather than guessing a sleep.
+      await prisma.$executeRaw`
+        SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM (expires_at - clock_timestamp())))::double precision + 0.02)
+        FROM orders WHERE id = ${order.id}::uuid
+      `;
+      await place();
+    });
+  } finally {
+    if (payment) await payment;
+  }
+  const response = await payment!;
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ result: 'needs_review', reason: 'late_payment_stock_unavailable' });
+  expect(await availablePuffs()).toBe(0);
+});
+
 test('late payment checks every item before reclaiming any stock', async () => {
   const response = await request(app).post('/orders').send({ items: [
     { productId: 1, quantity: 1 }, { productId: 4, quantity: 2 },
